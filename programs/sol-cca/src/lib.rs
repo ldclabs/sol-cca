@@ -41,26 +41,6 @@ fn align_up(value: u128, spacing: u128) -> Result<u128> {
     Ok(ceil_div(value, spacing)? * spacing)
 }
 
-fn pow10_u128(exp: u8) -> Result<u128> {
-    let mut v: u128 = 1;
-    for _ in 0..exp {
-        v = v
-            .checked_mul(10)
-            .ok_or_else(|| error!(CCAError::MathOverflow))?;
-    }
-    Ok(v)
-}
-
-fn pow10_u64(exp: u8) -> Result<u64> {
-    let mut v: u64 = 1;
-    for _ in 0..exp {
-        v = v
-            .checked_mul(10)
-            .ok_or_else(|| error!(CCAError::MathOverflow))?;
-    }
-    Ok(v)
-}
-
 #[program]
 pub mod solana_cca {
     use super::*;
@@ -170,7 +150,9 @@ pub mod solana_cca {
         auction.token_decimals = token_decimals;
         // If we store `one_token` as u64, cap decimals to avoid overflow.
         require!(token_decimals <= 19, CCAError::InvalidTokenDecimals);
-        auction.one_token = pow10_u64(token_decimals)?;
+        auction.one_token = 10u64
+            .checked_pow(token_decimals as u32)
+            .ok_or_else(|| error!(CCAError::MathOverflow))?;
 
         auction.start_time = start_time;
         auction.end_time = end_time;
