@@ -46,7 +46,7 @@ Args:
 - `min_bid_amount: u64`
 - `required_currency_raised: u64`
 
-### `place_bid`
+### `submit_bid`
 
 Places a bid and registers its flow into the tick of `max_price`.
 

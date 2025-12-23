@@ -50,7 +50,7 @@ describe("sol-cca", () => {
       [
         Buffer.from("tick"),
         auction.toBuffer(),
-        price.toArrayLike(Buffer, "le", 16),
+        price.toArrayLike(Buffer, "le", 8),
       ],
       program.programId
     )[0];
@@ -112,6 +112,12 @@ describe("sol-cca", () => {
       tokenMint,
       authority
     );
+    const authorityCurrencyAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      currencyMint,
+      authority
+    );
     await mintTo(
       provider.connection,
       payer,
@@ -130,7 +136,9 @@ describe("sol-cca", () => {
         floorPrice,
         tickSpacing,
         minBidAmount,
-        requiredCurrencyRaised
+        requiredCurrencyRaised,
+        authorityTokenAta.address,
+        authorityCurrencyAta.address
       )
       .accounts({
         auction: auctionKeypair.publicKey,
@@ -214,7 +222,7 @@ describe("sol-cca", () => {
     const tick1Pda = getTickPda(auctionKeypair.publicKey, maxPrice1);
 
     await program.methods
-      .placeBid(bid1Nonce, bidAmount1, maxPrice1)
+      .submitBid(bid1Nonce, bidAmount1, maxPrice1)
       .accounts({
         auction: auctionKeypair.publicKey,
         bid: bid1Pda,
@@ -253,7 +261,7 @@ describe("sol-cca", () => {
     );
     const tick1bPda = getTickPda(auctionKeypair.publicKey, maxPrice1b);
     await program.methods
-      .placeBid(bid1bNonce, bidAmount1b, maxPrice1b)
+      .submitBid(bid1bNonce, bidAmount1b, maxPrice1b)
       .accounts({
         auction: auctionKeypair.publicKey,
         bid: bid1bPda,
@@ -317,7 +325,7 @@ describe("sol-cca", () => {
     const tick2Pda = getTickPda(auctionKeypair.publicKey, maxPrice2);
 
     await program.methods
-      .placeBid(bid2Nonce, bidAmount2, maxPrice2)
+      .submitBid(bid2Nonce, bidAmount2, maxPrice2)
       .accounts({
         auction: auctionKeypair.publicKey,
         bid: bid2Pda,
@@ -372,6 +380,206 @@ describe("sol-cca", () => {
     expect(afterUser1Token.amount).to.equal(
       BigInt(bid1AfterClaim.tokensFilled.toString())
     );
+
+    // 4. Sweep raised currency + unsold tokens (auction must be graduated)
+    const auctionFinal = await program.account.auctionState.fetch(
+      auctionKeypair.publicKey
+    );
+
+    const beforeFundsRecipient = await getAccount(
+      provider.connection,
+      authorityCurrencyAta.address
+    );
+    await program.methods
+      .sweepCurrency()
+      .accounts({
+        auction: auctionKeypair.publicKey,
+        vaultAuthority: vaultAuthorityPda,
+        currencyVault: currencyVaultPda,
+        currencyMint,
+        fundsRecipient: authorityCurrencyAta.address,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      } as any)
+      .rpc();
+    const afterFundsRecipient = await getAccount(
+      provider.connection,
+      authorityCurrencyAta.address
+    );
+    expect(afterFundsRecipient.amount - beforeFundsRecipient.amount).to.equal(
+      BigInt(auctionFinal.cumulativeDemandRaised.toString())
+    );
+
+    const beforeTokensRecipient = await getAccount(
+      provider.connection,
+      authorityTokenAta.address
+    );
+    await program.methods
+      .sweepToken()
+      .accounts({
+        auction: auctionKeypair.publicKey,
+        vaultAuthority: vaultAuthorityPda,
+        tokenVault: tokenVaultPda,
+        tokenMint,
+        tokensRecipient: authorityTokenAta.address,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      } as any)
+      .rpc();
+    const afterTokensRecipient = await getAccount(
+      provider.connection,
+      authorityTokenAta.address
+    );
+    const unsold = auctionFinal.totalSupply.sub(auctionFinal.cumulativeSupplyReleased);
+    expect(afterTokensRecipient.amount - beforeTokensRecipient.amount).to.equal(
+      BigInt(unsold.toString())
+    );
+  });
+
+  it("Rejects low max_price griefing bid", async () => {
+    const startTime = Math.floor(Date.now() / 1000) + 2;
+    const endTime = startTime + 6;
+    const totalSupply = new BN(1_000_000_000); // 10 tokens with 8 decimals
+    const tokenDecimals = 8;
+    const floorPrice = new BN(100);
+    const tickSpacing = new BN(10);
+    const minBidAmount = new BN(1000);
+    const requiredCurrencyRaised = new BN(1);
+
+    const tokenMint = await createMint(
+      provider.connection,
+      payer,
+      authority,
+      null,
+      tokenDecimals
+    );
+    const currencyMint = await createMint(
+      provider.connection,
+      payer,
+      authority,
+      null,
+      6
+    );
+
+    const localAuctionKeypair = Keypair.generate();
+    const vaultAuthorityPda = getVaultAuthorityPda(localAuctionKeypair.publicKey);
+    const tokenVaultPda = getTokenVaultPda(localAuctionKeypair.publicKey);
+    const currencyVaultPda = getCurrencyVaultPda(localAuctionKeypair.publicKey);
+
+    const authorityTokenAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      tokenMint,
+      authority
+    );
+    const authorityCurrencyAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      currencyMint,
+      authority
+    );
+    await mintTo(
+      provider.connection,
+      payer,
+      tokenMint,
+      authorityTokenAta.address,
+      payer,
+      BigInt(totalSupply.toString())
+    );
+
+    await program.methods
+      .initialize(
+        totalSupply,
+        tokenDecimals,
+        new BN(startTime),
+        new BN(endTime),
+        floorPrice,
+        tickSpacing,
+        minBidAmount,
+        requiredCurrencyRaised,
+        authorityTokenAta.address,
+        authorityCurrencyAta.address
+      )
+      .accounts({
+        auction: localAuctionKeypair.publicKey,
+        authority: authority,
+        tokenMint,
+        currencyMint,
+        vaultAuthority: vaultAuthorityPda,
+        tokenVault: tokenVaultPda,
+        currencyVault: currencyVaultPda,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .signers([localAuctionKeypair])
+      .rpc();
+
+    // Fund token vault so claims can succeed
+    await transfer(
+      provider.connection,
+      payer,
+      authorityTokenAta.address,
+      tokenVaultPda,
+      payer,
+      BigInt(totalSupply.toString())
+    );
+
+    // Wait for auction to start
+    while (Math.floor(Date.now() / 1000) < startTime) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+
+    const attacker = Keypair.generate();
+    const signature = await provider.connection.requestAirdrop(
+      attacker.publicKey,
+      1000000000
+    );
+    await provider.connection.confirmTransaction(signature);
+
+    const attackerCurrencyAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      currencyMint,
+      attacker.publicKey
+    );
+    await mintTo(
+      provider.connection,
+      payer,
+      currencyMint,
+      attackerCurrencyAta.address,
+      payer,
+      BigInt(1_000_000_000_000)
+    );
+
+    // Attempt: huge amount but max_price only slightly above clearing price.
+    // With the new on-chain lower-bound check this must be rejected.
+    const bidNonce = new BN(1);
+    const hugeAmount = new BN(500_000_000_000);
+    const lowMaxPrice = new BN(110); // tickSpacing=10 aligned, but intentionally too low for huge amount
+
+    const bidPda = getBidPda(localAuctionKeypair.publicKey, attacker.publicKey, bidNonce);
+    const tickPda = getTickPda(localAuctionKeypair.publicKey, lowMaxPrice);
+
+    try {
+      await program.methods
+        .submitBid(bidNonce, hugeAmount, lowMaxPrice)
+        .accounts({
+          auction: localAuctionKeypair.publicKey,
+          bid: bidPda,
+          tick: tickPda,
+          user: attacker.publicKey,
+          currencyMint,
+          userCurrency: attackerCurrencyAta.address,
+          vaultAuthority: vaultAuthorityPda,
+          currencyVault: currencyVaultPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        } as any)
+        .signers([attacker])
+        .rpc();
+      throw new Error("expected submitBid to fail, but it succeeded");
+    } catch (e: any) {
+      const msg = e?.toString?.() ?? String(e);
+      expect(msg).to.match(/MaxPriceTooLow|max price too low/i);
+    }
   });
 
   it("Basic Auction Flow (Token-2022)", async () => {
@@ -420,6 +628,16 @@ describe("sol-cca", () => {
       undefined,
       TOKEN_2022_PROGRAM_ID
     );
+    const authorityCurrencyAta = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      currencyMint,
+      authority,
+      false,
+      undefined,
+      undefined,
+      TOKEN_2022_PROGRAM_ID
+    );
     await mintTo(
       provider.connection,
       payer,
@@ -441,7 +659,9 @@ describe("sol-cca", () => {
         floorPrice,
         tickSpacing,
         minBidAmount,
-        requiredCurrencyRaised
+        requiredCurrencyRaised,
+        authorityTokenAta.address,
+        authorityCurrencyAta.address
       )
       .accounts({
         auction: auctionKeypair2022.publicKey,
@@ -525,7 +745,7 @@ describe("sol-cca", () => {
     const tick1Pda = getTickPda(auctionKeypair2022.publicKey, maxPrice1);
 
     await program.methods
-      .placeBid(bid1Nonce, bidAmount1, maxPrice1)
+      .submitBid(bid1Nonce, bidAmount1, maxPrice1)
       .accounts({
         auction: auctionKeypair2022.publicKey,
         bid: bid1Pda,
@@ -585,6 +805,66 @@ describe("sol-cca", () => {
     );
     expect(afterUser1Token.amount).to.equal(
       BigInt(bid1AfterClaim.tokensFilled.toString())
+    );
+
+    // 4. Sweep raised currency + unsold tokens (Token-2022)
+    const auctionFinal = await program.account.auctionState.fetch(
+      auctionKeypair2022.publicKey
+    );
+
+    const beforeFundsRecipient = await getAccount(
+      provider.connection,
+      authorityCurrencyAta.address,
+      undefined,
+      TOKEN_2022_PROGRAM_ID
+    );
+    await program.methods
+      .sweepCurrency()
+      .accounts({
+        auction: auctionKeypair2022.publicKey,
+        vaultAuthority: vaultAuthorityPda,
+        currencyVault: currencyVaultPda,
+        currencyMint,
+        fundsRecipient: authorityCurrencyAta.address,
+        tokenProgram: TOKEN_2022_PROGRAM_ID,
+      } as any)
+      .rpc();
+    const afterFundsRecipient = await getAccount(
+      provider.connection,
+      authorityCurrencyAta.address,
+      undefined,
+      TOKEN_2022_PROGRAM_ID
+    );
+    expect(afterFundsRecipient.amount - beforeFundsRecipient.amount).to.equal(
+      BigInt(auctionFinal.cumulativeDemandRaised.toString())
+    );
+
+    const beforeTokensRecipient = await getAccount(
+      provider.connection,
+      authorityTokenAta.address,
+      undefined,
+      TOKEN_2022_PROGRAM_ID
+    );
+    await program.methods
+      .sweepToken()
+      .accounts({
+        auction: auctionKeypair2022.publicKey,
+        vaultAuthority: vaultAuthorityPda,
+        tokenVault: tokenVaultPda,
+        tokenMint,
+        tokensRecipient: authorityTokenAta.address,
+        tokenProgram: TOKEN_2022_PROGRAM_ID,
+      } as any)
+      .rpc();
+    const afterTokensRecipient = await getAccount(
+      provider.connection,
+      authorityTokenAta.address,
+      undefined,
+      TOKEN_2022_PROGRAM_ID
+    );
+    const unsold = auctionFinal.totalSupply.sub(auctionFinal.cumulativeSupplyReleased);
+    expect(afterTokensRecipient.amount - beforeTokensRecipient.amount).to.equal(
+      BigInt(unsold.toString())
     );
   });
 

@@ -4,20 +4,28 @@ use anchor_lang::prelude::*;
 pub enum CCAError {
     #[msg("Auction is not active")]
     AuctionNotActive,
+
     #[msg("Bid amount is too small")]
     BidTooSmall,
+
     #[msg("Price is below current clearing price")]
     PriceBelowClearing,
+
     #[msg("Auction has already ended")]
     AuctionEnded,
+
     #[msg("Auction is still active")]
     AuctionStillActive,
+
     #[msg("Bid has already been claimed")]
     AlreadyClaimed,
+
     #[msg("Invalid tick account")]
     InvalidTick,
+
     #[msg("Not the owner of the bid")]
     NotOwner,
+
     #[msg("Invalid auction duration")]
     InvalidAuctionDuration,
 
@@ -39,9 +47,18 @@ pub enum CCAError {
     #[msg("Tick accounts must be sorted by price ascending")]
     InvalidTickOrder,
 
+    #[msg("Max price too low for this bid")]
+    MaxPriceTooLow,
+
     #[msg("Invalid bid id")]
     InvalidBidId,
 
     #[msg("Bid does not belong to this auction")]
     InvalidBidAuction,
+
+    #[msg("Auction has not graduated")]
+    AuctionNotGraduated,
+
+    #[msg("Assets already swept")]
+    AlreadySwept,
 }
